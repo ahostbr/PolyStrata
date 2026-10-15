@@ -56,8 +56,9 @@ struct CpuExpert {
     int row = 0;
 };
 
-/// Checks that ggml-cpu has a dot product for both types.  Call once per layer format at load.
-bool cpu_expert_types_ok(int gu_type, int d_type, int n_embd, int n_ff, std::string& err);
+/// Checks dot products and row geometry; mixed gate/up must share an activation format.
+/// An omitted up_type uses gu_type. Call once per layer format at load.
+bool cpu_expert_types_ok(int gu_type, int d_type, int n_embd, int n_ff, std::string& err, int up_type = -1);
 
 /// One MXFP4 block (an E8M0 exponent and 16 bytes of nibbles, 17 bytes) as the Q5_0 block of the same 32 values
 /// (22 bytes).  False, with dst unwritten, when the block's power of two does not fit a half.
@@ -71,6 +72,6 @@ bool mxfp4_block_to_q5_0(const uint8_t* src, uint8_t* dst);
 /// `meanwhile`, when given, is run once by one of the threads, beside the first products.  It must not throw.
 void cpu_experts(Workers& workers, const CpuExpert* experts, int n, int rows, int gu_type, int d_type, int n_embd,
                  int n_ff, const float* x, float limit, bool gelu, float* out,
-                 const std::function<void()>* meanwhile = nullptr);
+                 const std::function<void()>* meanwhile = nullptr, int up_type = -1);
 
 }  // namespace strata::poly

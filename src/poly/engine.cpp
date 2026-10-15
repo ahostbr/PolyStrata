@@ -5,6 +5,9 @@
 #include "deepseek4.hpp"
 #include "gemma4.hpp"
 #include "glm5next.hpp"
+#ifdef STRATA_EXPERIMENTAL_MIMO
+#include "mimo2.hpp"
+#endif
 #include "mmq.hpp"
 #include "qwen35.hpp"
 #include "runtime.hpp"
@@ -718,7 +721,7 @@ void Engine::load_shape() {
 // A MoE layer: its router and shared expert to VRAM, and its routed experts' places in the file, where they
 // stay; fill_expert_cache() copies the ones VRAM has room for.  A file may keep an expert's gate and up in one
 // tensor, the gate's rows first.
-void Engine::load_moe(int il, bool shared) {
+void Engine::load_moe(int il, bool shared, bool mixed_gate_up) {
     Layer& L = layers_[(size_t) il];
     auto mat = [&](const char* n, int64_t a, int64_t b) { return upload(tensor(il, n), blk(il, n), a, b, kAnyMat); };
     L.moe = true;
@@ -753,17 +756,23 @@ void Engine::load_moe(int il, bool shared) {
     } else {
         const TensorInfo& tg = exps("ffn_gate_exps.weight", n_embd_, n_ff_exp_);
         const TensorInfo& tu = exps("ffn_up_exps.weight", n_embd_, n_ff_exp_);
-        if (tg.type != tu.type)
+        if (tg.type != tu.type && !mixed_gate_up)
             throw std::runtime_error(tg.name + " and " + tu.name +
                                      " have different types, which this engine does not run");
         L.gu_type = tg.type;
+        L.up_type = tu.type;
+        L.up_stride = L.up_bytes = home(tu).payload(tu) / (size_t) n_expert_;
         L.gu_stride = L.gu_bytes = home(tg).payload(tg) / (size_t) n_expert_;
-        home(tu).payload(tu);
         L.exp_gate = home(tg).data(tg);
         L.exp_up = home(tu).data(tu);
     }
     std::string err;
-    if (!cpu_expert_types_ok((int) L.gu_type, (int) L.d_type, n_embd_, n_ff_exp_, err))
+    if (tensor(il, "ffn_gate_up_exps.weight")) {
+        L.up_type = L.gu_type;
+        L.up_stride = L.gu_stride;
+        L.up_bytes = L.gu_bytes;
+    }
+    if (!cpu_expert_types_ok((int) L.gu_type, (int) L.d_type, n_embd_, n_ff_exp_, err, (int) L.up_type))
         throw std::runtime_error(blk(il, "ffn_*_exps.weight: ") + err);
     L.slot.assign((size_t) n_expert_, nullptr);
     ++n_moe_;
@@ -777,6 +786,9 @@ void Engine::load_moe(int il, bool shared) {
 // the activations as Q8_0, and the dot products differ only in the order of their sums.  A layer with a power out of
 // range stays MXFP4.
 void Engine::mxfp4_to_q5_0(int il) {
+    // The sizing pass does not use expert weights. Converting there would keep a second
+    // unused copy for the engine's lifetime (4.125 GiB for MiMo GSQ-RCO 3-bit).
+    if (!dense_) return;
     Layer& L = layers_[(size_t) il];
     constexpr size_t kIn = 17, kOut = 22;   // block_mxfp4, block_q5_0
     const size_t blocks = L.d_bytes * (size_t) n_expert_ / kIn;
@@ -815,6 +827,9 @@ std::unique_ptr<Engine> Engine::open(const Options& o) {
         if (name == "qwen35moe") return std::make_unique<Qwen35>();
         if (name == "gemma4") return std::make_unique<Gemma4>();
         if (name == "deepseek4") return std::make_unique<DeepSeek4>();
+#ifdef STRATA_EXPERIMENTAL_MIMO
+        if (name == "mimo2") return std::make_unique<Mimo2>();
+#endif
         throw std::runtime_error(o.model + " is a '" + name + "' model, which this engine does not run");
     };
     int cards = 1;
@@ -986,7 +1001,7 @@ void Engine::fill_expert_cache() {
     size_t all = 0;
     for (int il = 0; il < (int) layers_.size(); ++il) {
         Layer& L = layers_[(size_t) il];
-        if (!L.moe || !kernels::native_mmvq_supported((int) L.gu_type) ||
+        if (!L.moe || L.gu_type != L.up_type || !kernels::native_mmvq_supported((int) L.gu_type) ||
             !kernels::native_mmvq_supported((int) L.d_type))
             continue;
         // A slot is a whole number of blocks of both of the experts' types, so the slots of a layer that lie one
@@ -1481,7 +1496,7 @@ void Engine::load(const Options& o) {
     for (const Layer& L : layers_) {
         if (!L.moe) continue;
         spans.emplace_back(L.exp_gate, (size_t) n_expert_ * L.gu_stride);
-        if (L.gu_stride == L.gu_bytes) spans.emplace_back(L.exp_up, (size_t) n_expert_ * L.gu_bytes);
+        if (L.gu_stride == L.gu_bytes) spans.emplace_back(L.exp_up, (size_t) n_expert_ * L.up_bytes);
         spans.emplace_back(L.exp_down, (size_t) n_expert_ * L.d_bytes);
     }
     if (!workers_) {   // a later card's engine has the first one's
@@ -1570,7 +1585,8 @@ void Engine::alloc() {
     for (int il = 0; il < n_layer_; ++il) {
         Layer& L = layers_[(size_t) il];
         if (!L.moe) continue;
-        L.mmq = opt_.gpu_experts && rows_ >= kStageRows && Mmq::fits((int) L.gu_type, 2 * n_ff_exp_, n_embd_) &&
+        L.mmq = opt_.gpu_experts && L.gu_type == L.up_type && rows_ >= kStageRows &&
+                Mmq::fits((int) L.gu_type, 2 * n_ff_exp_, n_embd_) &&
                 Mmq::fits((int) L.d_type, n_embd_, n_ff_exp_);
         tiles = tiles || L.mmq;
         one_expert = std::max(one_expert, 2 * L.gu_bytes + L.d_bytes);
@@ -1865,7 +1881,7 @@ bool Engine::moe(Layer& L, int il, int n, const std::function<void()>* first) {
                 }
                 host_e[n_host] = (int32_t) e;
                 host_k[n_host] = k;
-                host[n_host++] = {L.exp_gate + e * L.gu_stride, L.exp_up + e * L.gu_stride,
+                host[n_host++] = {L.exp_gate + e * L.gu_stride, L.exp_up + e * L.up_stride,
                                   L.exp_down + e * L.d_bytes, w[k], t};
             }
         }
@@ -1941,7 +1957,7 @@ bool Engine::moe(Layer& L, int il, int n, const std::function<void()>* first) {
         t0 = Clock::now();
         cpu_experts(*workers_, host, n_host, m, (int) L.gu_type, (int) L.d_type, n_embd_, n_ff_exp_,
                     h_x_ + (size_t) at * e_row, limit, gelu_, cpu,
-                    n_cached > 0 || (first && at == 0) ? &launch : nullptr);
+                    n_cached > 0 || (first && at == 0) ? &launch : nullptr, (int) L.up_type);
         stats_.cpu_ms += ms_since(t0);
     }
     return any_host;

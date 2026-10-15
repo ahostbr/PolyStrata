@@ -1,0 +1,45 @@
+{
+  "repo_id": "pfeifferj/MiMo-V2.6-Flash-RL-GSQ-RCO-GGUF",
+  "revision": "a37b69042dbe3e375790d10ffefda6333365c718",
+  "files": [
+    {
+      "path": "MiMo-V2.6-Flash-RL-GSQ-RCO-3bit.gguf",
+      "size": 115678863104,
+      "sha256": "e4b6787aa113304c9a69202104568da9081eb3b5c43d4ef117578ddb98e3425b"
+    }
+  ],
+  "total_bytes": 115678863104,
+  "architecture": "mimo2",
+  "status": "experimental; full-model acceptance pending",
+  "max_context": 8192,
+  "draft": false,
+  "target_gpu": "NVIDIA GeForce RTX 5090 32GB",
+  "target_system_ram_gib": 96,
+  "dedicated_test_free_ram_gib": [
+    5,
+    10
+  ],
+  "mixed_gate_up_cpu_layers": [
+    7,
+    12,
+    15,
+    21,
+    22,
+    24,
+    30,
+    33,
+    34,
+    35,
+    36,
+    37,
+    40,
+    43,
+    45,
+    47
+  ],
+  "mxfp4_down_layers": [
+    44,
+    46,
+    47
+  ]
+}

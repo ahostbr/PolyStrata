@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import pathlib
 import sys
+import unicodedata
 
 import regex
 
@@ -76,6 +77,10 @@ GLM4_PATTERN = (
     r"|\s+"
 )
 
+# MiMo2 declares qwen2. Unlike qwen35 it keeps combining marks out of letter runs;
+# unlike glm4 it splits digits singly and uses the normal BPE merge rules.
+QWEN2_PATTERN = GLM4_PATTERN.replace(r"\p{N}{1,3}", r"\p{N}")
+
 # The `gemma4` tokenizer (Gemma 4), from llama.cpp's LLAMA_VOCAB_PRE_TYPE_GEMMA4: a BPE over UTF-8 characters, not
 # over GPT-2's byte alphabet.  A space is written with SentencePiece's visible space before anything else, the text
 # is cut only at runs of newlines, a run that is a token as a whole is that token, the merges run over the rest,
@@ -99,7 +104,7 @@ DEEPSEEK3_SEQUENCE = (
 )
 
 PRE_PATTERNS = {"glm4": GLM4_PATTERN, "glm5": GLM4_PATTERN,   # every other name: QWEN35_PATTERN, as before
-                "gemma4": GEMMA4_PATTERN}
+                "gemma4": GEMMA4_PATTERN, "qwen2": QWEN2_PATTERN}
 PRE_SEQUENCES = {"joyai-llm": DEEPSEEK3_SEQUENCE, "deepseek-v3": DEEPSEEK3_SEQUENCE}
 IGNORE_MERGES = ("glm4", "glm5")
 RAW = ("gemma4",)                      # vocabularies of UTF-8 pieces
@@ -108,7 +113,11 @@ MODELS = {"gpt2": None, "gemma4": "gemma4"}   # tokenizer.ggml.model -> the pre-
 
 class Tokenizer:
     def __init__(self, tokens: list[str], merges: list[str], token_types: list[int] | None = None,
-                 pre: str = "qwen35", special_ids: dict[str, int] | None = None):
+                 pre: str = "qwen35", special_ids: dict[str, int] | None = None,
+                 normalizer: str | None = None):
+        if normalizer not in (None, "NFC"):
+            raise ValueError("unsupported tokenizer normalizer: %r" % normalizer)
+        self.normalizer = normalizer
         self.tokens = tokens
         self.pre = pre
         self.raw = pre in RAW
@@ -187,7 +196,9 @@ class Tokenizer:
                    if k.startswith("tokenizer.ggml.") and k.endswith("_token_id")}
         return cls(list(md["tokenizer.ggml.tokens"]), list(md["tokenizer.ggml.merges"]),
                    list(md.get("tokenizer.ggml.token_type") or []) or None,
-                   MODELS[model] or md.get("tokenizer.ggml.pre", "qwen35"), special)
+                   MODELS[model] or md.get("tokenizer.ggml.pre", "qwen35"), special,
+                   # Xiaomi's tokenizer.json has NFC; qwen2 alone does not imply it.
+                   normalizer="NFC" if md.get("general.architecture") == "mimo2" else None)
 
     @classmethod
     def from_dir(cls, path) -> "Tokenizer":
@@ -204,7 +215,8 @@ class Tokenizer:
         # the pre-tokenizer's name and the GGUF's special ids (a directory from before they mattered has neither)
         meta = json.loads((path / "tokenizer.json").read_text(encoding="utf-8")) \
             if (path / "tokenizer.json").exists() else {}
-        return cls(tokens, merges, types, pre=meta.get("pre", "qwen35"), special_ids=meta.get("special_ids"))
+        return cls(tokens, merges, types, pre=meta.get("pre", "qwen35"), special_ids=meta.get("special_ids"),
+                   normalizer=meta.get("normalizer"))
 
     # -------------------------------------------------------------- the algorithm
     def _bpe(self, word: str) -> list[str]:
@@ -325,6 +337,9 @@ class Tokenizer:
         return pieces
 
     def _encode_plain(self, text: str) -> list[int]:
+        # Normalize after special-token matching so `plain` span offsets remain valid.
+        if self.normalizer:
+            text = unicodedata.normalize(self.normalizer, text)
         if self.raw:
             return self._encode_raw(text)
         out: list[int] = []
@@ -449,9 +464,12 @@ def extract(gguf_path, out_dir) -> dict:
                               else "llama.cpp src/llama-vocab.cpp (LLAMA_VOCAB_PRE_TYPE_DEEPSEEK3_LLM)"
                               if tk.pre_sequence
                               else "llama.cpp src/llama-vocab.cpp (LLAMA_VOCAB_PRE_TYPE_CHATGLM4)" if tk.ignore_merges
+                              else "llama.cpp src/llama-vocab.cpp (LLAMA_VOCAB_PRE_TYPE_QWEN2)" if tk.pre == "qwen2"
                               else ".ref/llama.cpp src/llama-vocab.cpp L396 (LLAMA_VOCAB_PRE_TYPE_QWEN35)",
         "ignore_merges": tk.ignore_merges,
     }
+    if tk.normalizer:
+        cfg["normalizer"] = tk.normalizer
     (out / "vocab.json").write_text(json.dumps(tk.ids, ensure_ascii=False), encoding="utf-8")
     merges = ["%s %s" % k for k, _ in sorted(tk.ranks.items(), key=lambda kv: kv[1])]
     if tk.raw:      # its pieces can hold a newline, which a line a merge cannot

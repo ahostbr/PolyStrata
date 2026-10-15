@@ -12,7 +12,11 @@ project(strata VERSION 0.1.44.1 LANGUAGES CXX)
 # EXPERIMENTAL: the Intel Arc engine, the SYCL port in sycl/ (PR #423; icpx + oneMKL, docs/INTEL_ARC.md). It is its
 # own project that takes the unported sources from src/; with this on, nothing below is configured.
 option(STRATA_ENABLE_SYCL "EXPERIMENTAL: build the Intel Arc (SYCL) engine from sycl/ - docs/INTEL_ARC.md" OFF)
+option(STRATA_EXPERIMENTAL_MIMO "Experimental text-only MiMo2 backend (CUDA, max 8K context)" OFF)
 if(STRATA_ENABLE_SYCL)
+  if(STRATA_EXPERIMENTAL_MIMO)
+    message(FATAL_ERROR "STRATA_EXPERIMENTAL_MIMO currently requires the CUDA backend")
+  endif()
   if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
     message(FATAL_ERROR "STRATA_ENABLE_SYCL is a separate backend; leave STRATA_ENABLE_CUDA and STRATA_ENABLE_HIP off")
   endif()
@@ -105,6 +109,9 @@ option(STRATA_WERROR "Treat compiler warnings as errors" OFF)
 # #2027: defined here, before the GPU section reads it to register the native-expert tests (it was defined at the
 # native-experts section far below, so a first configure registered four tests fewer than the second)
 option(STRATA_NATIVE_EXPERTS "Native (IQ) expert support through ggml-cpu" ON)
+if(STRATA_EXPERIMENTAL_MIMO AND (NOT STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP OR STRATA_HIP_GFX906 OR NOT STRATA_NATIVE_EXPERTS))
+  message(FATAL_ERROR "STRATA_EXPERIMENTAL_MIMO requires native experts and the NVIDIA CUDA backend")
+endif()
 
 if(STRATA_BUILD_CONVERSATION_TESTS)
   enable_testing()
@@ -1848,6 +1855,24 @@ if(STRATA_NATIVE_EXPERTS AND (STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP) AND NOT S
   target_link_libraries(poly_draft_race_test PRIVATE strata_poly_mmq strata_kernels strata_spec ggml-cpu ggml-base
                                                     ${_strata_gpu_blas_target} ${_strata_gpu_runtime_target}
                                                     ${_strata_poly_driver} Threads::Threads)
+  if(STRATA_EXPERIMENTAL_MIMO)
+    foreach(_target strata-poly poly_draft_race_test)
+      target_sources(${_target} PRIVATE src/poly/mimo2.cpp src/poly/kernels_mimo.cu)
+      target_compile_definitions(${_target} PRIVATE STRATA_EXPERIMENTAL_MIMO=1)
+    endforeach()
+    add_executable(poly_mimo_test src/poly/mimo_test.cu src/poly/kernels_mimo.cu)
+    target_include_directories(poly_mimo_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_link_libraries(poly_mimo_test PRIVATE ${_strata_gpu_runtime_target})
+    get_target_property(_mimo_engine_sources strata-poly SOURCES)
+    list(REMOVE_ITEM _mimo_engine_sources src/poly/main.cpp)
+    add_executable(poly_mimo_engine_test src/poly/mimo_engine_test.cpp ${_mimo_engine_sources})
+    target_compile_definitions(poly_mimo_engine_test PRIVATE STRATA_EXPERIMENTAL_MIMO=1)
+    target_include_directories(poly_mimo_engine_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include
+                                                           ${_strata_gpu_include_directories})
+    target_link_libraries(poly_mimo_engine_test PRIVATE strata_poly_mmq strata_kernels strata_spec ggml-cpu
+                         ggml-base ${_strata_gpu_blas_target} ${_strata_gpu_runtime_target}
+                         ${_strata_poly_driver} Threads::Threads)
+  endif()
   # a prompt batch's routing on the card against the hosts' routing; needs a card, so it is run by hand
   add_executable(poly_route_test src/poly/route_test.cu src/poly/kernels.cu)
   target_include_directories(poly_route_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include

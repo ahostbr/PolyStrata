@@ -1,5 +1,8 @@
 <h1 align="center">PolyStrata</h1>
 
+This fork has an opt-in [experimental MiMo-V2.6-Flash-RL backend](docs/MIMO.md), targeting GSQ-RCO 3-bit on an
+RTX 5090 with 96 GB RAM. Synthetic CUDA tests pass; full-model inference, memory fit and speed remain unverified.
+
 **English** · [简体中文](README.zh-CN.md) · [日本語](README.ja.md) · [Deutsch](README.de.md) · [Français](README.fr.md) · [Español](README.es.md) · [Português](README.pt-BR.md)
 
 <p align="center"><b>Run large AI models on your own PC</b><br>

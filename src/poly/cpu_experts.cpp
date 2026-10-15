@@ -144,29 +144,39 @@ bool mxfp4_block_to_q5_0(const uint8_t* src, uint8_t* dst) {
     return true;
 }
 
-bool cpu_expert_types_ok(int gu_type, int d_type, int n_embd, int n_ff, std::string& err) {
+bool cpu_expert_types_ok(int gu_type, int d_type, int n_embd, int n_ff, std::string& err, int up_type) {
     init_once();
-    for (const int type : {gu_type, d_type}) {
+    if (up_type < 0) up_type = gu_type;
+    const int types[] = {gu_type, up_type, d_type};
+    for (int i = 0; i < 3; ++i) {
+        const int type = types[i];
         const ggml_type_traits_cpu* t = traits(type);
         const ggml_type_traits_cpu* a = t && t->vec_dot ? traits(t->vec_dot_type) : nullptr;
         if (a == nullptr || a->from_float == nullptr) {
             err = "ggml-cpu has no dot product for tensor type " + std::to_string(type);
             return false;
         }
-        const int n = type == gu_type ? n_embd : n_ff;
+        const int n = i == 2 ? n_ff : n_embd;
         if (n % ggml_blck_size((ggml_type) type) || n % ggml_blck_size(t->vec_dot_type)) {
             err = "a row of " + std::to_string(n) + " values is not whole blocks of tensor type " + std::to_string(type);
             return false;
         }
+    }
+    if (traits(gu_type)->vec_dot_type != traits(up_type)->vec_dot_type) {
+        err = "mixed gate/up requires the same activation format";
+        return false;
     }
     return true;
 }
 
 void cpu_experts(Workers& workers, const CpuExpert* experts, int n, int rows, int gu_type, int d_type, int n_embd,
                  int n_ff, const float* x, float limit, bool gelu, float* out,
-                 const std::function<void()>* meanwhile) {
+                 const std::function<void()>* meanwhile, int up_type) {
     init_once();
     const ggml_type_traits_cpu* tg = traits(gu_type);
+    if (up_type < 0) up_type = gu_type;
+    const ggml_type_traits_cpu* tu = traits(up_type);
+    const size_t up_row = ggml_row_size((ggml_type) up_type, n_embd);
     const ggml_type_traits_cpu* td = traits(d_type);
     const size_t gu_row = ggml_row_size((ggml_type) gu_type, n_embd);
     const size_t d_row = ggml_row_size((ggml_type) d_type, n_ff);
@@ -209,13 +219,13 @@ void cpu_experts(Workers& workers, const CpuExpert* experts, int n, int rows, in
         const int r0 = (t % gu_tasks) * kRowsPerTask, r1 = std::min(n_ff, r0 + kRowsPerTask);
         for (int r = r0; r < r1; ++r) {
             const uint8_t* gate = e.gate + (size_t) r * gu_row;
-            const uint8_t* up = e.up + (size_t) r * gu_row;
+            const uint8_t* up = e.up + (size_t) r * up_row;
             for (int i = i0; i < i1; ++i) {
                 const int j = byp[i];
                 const uint8_t* a = actp + (size_t) experts[j].row * a_bytes;
                 float g = 0.f, u = 0.f;
                 tg->vec_dot(n_embd, &g, 0, gate, 0, a, 0, 1);
-                tg->vec_dot(n_embd, &u, 0, up, 0, a, 0, 1);
+                tu->vec_dot(n_embd, &u, 0, up, 0, a, 0, 1);
                 if (gelu) {
                     hp[(size_t) j * n_ff + r] =
                         0.5f * g * (1.f + std::tanh(0.7978845608f * g * (1.f + 0.044715f * g * g))) * u;

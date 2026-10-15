@@ -103,7 +103,8 @@ struct Layer {
     const uint8_t* exp_gate = nullptr;  ///< n_expert experts back to back, in the mapped file
     const uint8_t* exp_up = nullptr;
     const uint8_t* exp_down = nullptr;
-    uint32_t gu_type = 0, d_type = 0;
+    uint32_t gu_type = 0, up_type = 0, d_type = 0;
+    size_t up_bytes = 0, up_stride = 0; ///< mixed gate/up stays on CPU; GPU slots still have equal gate/up formats
     size_t gu_bytes = 0, d_bytes = 0;  ///< one expert's gate (or up), and its down
     size_t gu_stride = 0;              ///< from an expert's gate to the next one's: twice gu_bytes in a file that
                                        ///< keeps an expert's gate and up in one tensor
@@ -381,7 +382,7 @@ protected:
     int shape_i(const char* key) const;
     float shape_f(const char* key) const;
     void load_shape();
-    void load_moe(int il, bool shared = true);
+    void load_moe(int il, bool shared = true, bool mixed_gate_up = false);
     void mxfp4_to_q5_0(int il);
     void alloc();
     void shared_scratch();
